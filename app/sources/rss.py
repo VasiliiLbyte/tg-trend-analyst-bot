@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 import feedparser
 import httpx
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import RetryError, retry, stop_after_attempt, wait_exponential
 
 from app.sources.base import SourceFetchResult
 from app.sources.models import NewsItem
@@ -30,7 +30,7 @@ class RssSource:
     async def fetch(self) -> SourceFetchResult:
         try:
             raw = await self._get()
-        except httpx.HTTPError as e:
+        except (httpx.HTTPError, RetryError) as e:
             logger.warning("rss_fetch_failed", extra={"source": self.name, "url": self.url, "err": str(e)})
             return SourceFetchResult(items=())
 

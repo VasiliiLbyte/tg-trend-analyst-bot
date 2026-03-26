@@ -25,10 +25,11 @@ class Settings(BaseSettings):
     tz: str = Field(default="UTC", alias="TZ")
     schedule_every_hours: int = Field(default=4, alias="SCHEDULE_EVERY_HOURS")
 
-    bot_token: str = Field(alias="BOT_TOKEN")
-    channel_id: str = Field(alias="CHANNEL_ID")
+    bot_token: str = Field(default="__MISSING__", alias="BOT_TOKEN")
+    channel_id: str = Field(default="__MISSING__", alias="CHANNEL_ID")  # @channel_username or -100...
+    dry_run: bool = Field(default=True, alias="DRY_RUN")
 
-    openrouter_api_key: str = Field(alias="OPENROUTER_API_KEY")
+    openrouter_api_key: str = Field(default="__MISSING__", alias="OPENROUTER_API_KEY")
     openrouter_base_url: str = Field(default="https://openrouter.ai/api/v1", alias="OPENROUTER_BASE_URL")
     openrouter_model: str = Field(default="anthropic/claude-3.7-sonnet", alias="OPENROUTER_MODEL")
 

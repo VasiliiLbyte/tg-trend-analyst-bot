@@ -15,6 +15,7 @@ from app.pipeline.rank import rank_items
 from app.pipeline.compose import compose_digest
 from app.pipeline.analyze import AnalyzeConfig, analyze_unanalyzed_items
 from app.llm.openrouter import OpenRouterClient
+from app.telegram.publisher import TelegramPublisher
 from app.sources.loader import load_sources_from_yaml
 from app.storage.dao import DaoConfig, StorageDao
 
@@ -46,8 +47,8 @@ def build_scheduler(
 @dataclass(frozen=True)
 class CycleConfig:
     sources_config_path: str
+    dry_run: bool
     ttl_days: int = 30
-    dry_run: bool = True
     top_k: int = 7
 
 
@@ -56,9 +57,10 @@ async def run_cycle(
     dao: StorageDao,
     cfg: CycleConfig,
     llm: OpenRouterClient | None = None,
+    publisher: TelegramPublisher | None = None,
 ) -> None:
     now = datetime.now(tz=timezone.utc).isoformat()
-    logger.info("cycle_start", extra={"ts": now})
+    logger.info("cycle_start ts=%s", now)
 
     sources = load_sources_from_yaml(path=Path(cfg.sources_config_path))
     rss_sources = sources.rss
@@ -86,33 +88,40 @@ async def run_cycle(
         if new_id is not None:
             inserted_ids.append(new_id)
 
+    prepared = compose_digest(ranked=ranked, top_k=cfg.top_k)
+    logger.info(
+        "prepare_for_publish dry_run=%s kind=%s messages=%d",
+        cfg.dry_run,
+        prepared.kind,
+        len(prepared.messages),
+    )
+
     analyzed_count = 0
-    if not cfg.dry_run:
+    if cfg.dry_run:
+        preview = prepared.messages[0] if prepared.messages else ""
+        logger.info("dry_run_skip_publish full_preview_first_message:\n%s", preview)
+    else:
         if llm is None:
             raise RuntimeError("llm_required_when_not_dry_run")
+        if publisher is None:
+            raise RuntimeError("publisher_required_when_not_dry_run")
+
         analyzed_count = await analyze_unanalyzed_items(
             dao=dao,
             llm=llm,
             cfg=AnalyzeConfig(batch_limit=20, concurrency=4),
             only_item_ids=tuple(inserted_ids),
         )
-
-    prepared = compose_digest(ranked=ranked, top_k=cfg.top_k)
-    logger.info(
-        "prepare_for_publish",
-        extra={"dry_run": cfg.dry_run, "kind": prepared.kind, "messages": len(prepared.messages)},
-    )
+        await publisher.publish_post(prepared)
 
     dao.cleanup_old_items()
     logger.info(
-        "cycle_end",
-        extra={
-            "ts": now,
-            "fetched": len(fetched),
-            "normalized": len(normalized),
-            "deduped": len(deduped),
-            "inserted": len(inserted_ids),
-            "analyzed": analyzed_count,
-        },
+        "cycle_end ts=%s fetched=%d normalized=%d deduped=%d inserted=%d analyzed=%d",
+        now,
+        len(fetched),
+        len(normalized),
+        len(deduped),
+        len(inserted_ids),
+        analyzed_count,
     )
 
