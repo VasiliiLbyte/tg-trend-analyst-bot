@@ -1,0 +1,7 @@
+rss:
+  - name: "TechCrunch"
+    url: "https://techcrunch.com/feed/"
+  - name: "HackerNewsFront"
+    url: "https://hnrss.org/frontpage"
+
+api: []
