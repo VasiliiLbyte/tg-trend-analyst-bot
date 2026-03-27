@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,7 +18,7 @@ from app.pipeline.analyze import AnalyzeConfig, analyze_unanalyzed_items
 from app.llm.openrouter import OpenRouterClient
 from app.telegram.publisher import TelegramPublisher
 from app.sources.loader import load_sources_from_yaml
-from app.storage.dao import DaoConfig, StorageDao
+from app.storage.dao import StorageDao
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +76,7 @@ async def run_cycle(
     ranked = rank_items(deduped)
 
     inserted_ids: list[int] = []
+    inserted_id_by_canonical_url: dict[str, int] = {}
     for r in ranked:
         new_id = dao.save_news_item(
             source_name=r.item.source_name,
@@ -87,41 +89,53 @@ async def run_cycle(
         )
         if new_id is not None:
             inserted_ids.append(new_id)
-
-    prepared = compose_digest(ranked=ranked, top_k=cfg.top_k)
-    logger.info(
-        "prepare_for_publish dry_run=%s kind=%s messages=%d",
-        cfg.dry_run,
-        prepared.kind,
-        len(prepared.messages),
-    )
+            inserted_id_by_canonical_url[r.item.canonical_url] = new_id
 
     analyzed_count = 0
-    if cfg.dry_run:
-        preview = prepared.messages[0] if prepared.messages else ""
-        logger.info("dry_run_skip_publish full_preview_first_message:\n%s", preview)
-    else:
+    if not cfg.dry_run:
         if llm is None:
             raise RuntimeError("llm_required_when_not_dry_run")
-        if publisher is None:
-            raise RuntimeError("publisher_required_when_not_dry_run")
-
         analyzed_count = await analyze_unanalyzed_items(
             dao=dao,
             llm=llm,
             cfg=AnalyzeConfig(batch_limit=20, concurrency=4),
             only_item_ids=tuple(inserted_ids),
         )
-        await publisher.publish_post(prepared)
+
+    prepared = compose_digest(ranked=ranked, top_k=cfg.top_k)
+    top_ranked = ranked[: cfg.top_k]
+    top_item_ids = tuple(
+        inserted_id_by_canonical_url[r.item.canonical_url]
+        for r in top_ranked
+        if r.item.canonical_url in inserted_id_by_canonical_url
+    )
+    prepared = replace(prepared, item_ids=top_item_ids)
+    logger.info(
+        "prepare_for_publish dry_run=%s kind=%s messages=%d item_ids=%d",
+        cfg.dry_run,
+        prepared.kind,
+        len(prepared.messages),
+        len(prepared.item_ids),
+    )
+
+    published = False
+    if cfg.dry_run:
+        preview = prepared.messages[0] if prepared.messages else ""
+        logger.info("dry_run_skip_publish full_preview_first_message:\n%s", preview)
+    else:
+        if publisher is None:
+            raise RuntimeError("publisher_required_when_not_dry_run")
+        published = await publisher.send_digest_post(dao=dao, post=prepared)
 
     dao.cleanup_old_items()
     logger.info(
-        "cycle_end ts=%s fetched=%d normalized=%d deduped=%d inserted=%d analyzed=%d",
+        "cycle_end ts=%s fetched=%d normalized=%d deduped=%d inserted=%d analyzed=%d published=%s",
         now,
         len(fetched),
         len(normalized),
         len(deduped),
         len(inserted_ids),
         analyzed_count,
+        published,
     )
 

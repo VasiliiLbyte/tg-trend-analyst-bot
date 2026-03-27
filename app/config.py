@@ -28,6 +28,8 @@ class Settings(BaseSettings):
     bot_token: str = Field(default="__MISSING__", alias="BOT_TOKEN")
     channel_id: str = Field(default="__MISSING__", alias="CHANNEL_ID")  # @channel_username or -100...
     dry_run: bool = Field(default=True, alias="DRY_RUN")
+    first_run_immediately: bool = Field(default=True, alias="FIRST_RUN_IMMEDIATELY")
+    scheduler_only: bool = Field(default=False, alias="SCHEDULER_ONLY")
 
     openrouter_api_key: str = Field(default="__MISSING__", alias="OPENROUTER_API_KEY")
     openrouter_base_url: str = Field(default="https://openrouter.ai/api/v1", alias="OPENROUTER_BASE_URL")

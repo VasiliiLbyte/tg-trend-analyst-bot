@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import argparse
 import logging
+from dataclasses import dataclass
 
 from aiogram import Bot, Dispatcher
 
@@ -18,9 +20,38 @@ logger = logging.getLogger(__name__)
 _MISSING = "__MISSING__"
 
 
-async def _run() -> None:
+@dataclass(frozen=True, slots=True)
+class RuntimeOptions:
+    dry_run_override: bool | None
+    scheduler_only_override: bool | None
+    run_once: bool
+
+
+def parse_args() -> RuntimeOptions:
+    parser = argparse.ArgumentParser(description="tg-trend-analyst-bot runner")
+    parser.add_argument("--dry-run", action="store_true", help="Run cycle without Telegram publishing.")
+    parser.add_argument(
+        "--scheduler-only",
+        action="store_true",
+        help="Run only scheduler, skip aiogram polling.",
+    )
+    parser.add_argument("--once", action="store_true", help="Run exactly one cycle and exit.")
+    args = parser.parse_args()
+    return RuntimeOptions(
+        dry_run_override=True if args.dry_run else None,
+        scheduler_only_override=True if args.scheduler_only else None,
+        run_once=bool(args.once),
+    )
+
+
+async def _run(opts: RuntimeOptions) -> None:
     settings = load_settings()
     configure_logging(LoggingConfig(level=settings.log_level))
+
+    dry_run = opts.dry_run_override if opts.dry_run_override is not None else settings.dry_run
+    scheduler_only = (
+        opts.scheduler_only_override if opts.scheduler_only_override is not None else settings.scheduler_only
+    )
 
     logger.info("app_start", extra={"env": settings.app_env, "tz": settings.tz})
 
@@ -44,45 +75,44 @@ async def _run() -> None:
             )
         )
 
+    cycle_cfg = CycleConfig(sources_config_path=str(settings.sources_config_path), ttl_days=30, dry_run=dry_run)
+
+    async def cycle_job() -> None:
+        await run_cycle(dao=dao, cfg=cycle_cfg, llm=llm, publisher=publisher)
+
     scheduler = build_scheduler(
         SchedulerConfig(tz=settings.tz, every_hours=settings.schedule_every_hours),
-        job=lambda: run_cycle(
-            dao=dao,
-            cfg=CycleConfig(
-                sources_config_path=str(settings.sources_config_path),
-                ttl_days=30,
-                dry_run=settings.dry_run,
-            ),
-            llm=llm,
-            publisher=publisher,
-        ),
+        job=cycle_job,
     )
-    # Run one cycle immediately on startup (useful for local development)
-    await run_cycle(
-        dao=dao,
-        cfg=CycleConfig(
-            sources_config_path=str(settings.sources_config_path),
-            ttl_days=30,
-            dry_run=settings.dry_run,
-        ),
-        llm=llm,
-        publisher=publisher,
-    )
+
+    if opts.run_once:
+        await cycle_job()
+        logger.info("run_once_finished")
+        return
+
+    if settings.first_run_immediately:
+        await cycle_job()
 
     scheduler.start()
 
-    # Keep process alive. If BOT_TOKEN isn't configured yet, don't start polling.
-    if settings.bot_token == _MISSING:
-        logger.info("bot_token_missing_skip_polling")
+    # Keep process alive. Skip polling in scheduler-only mode or without bot token.
+    if scheduler_only or settings.bot_token == _MISSING:
+        logger.info(
+            "scheduler_only_mode",
+            extra={"scheduler_only": scheduler_only, "bot_token_configured": settings.bot_token != _MISSING},
+        )
         await asyncio.Event().wait()
 
     bot = Bot(token=settings.bot_token)
     dp = Dispatcher()
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    finally:
+        await bot.session.close()
 
 
 def main() -> None:
-    asyncio.run(_run())
+    asyncio.run(_run(parse_args()))
 
 
 if __name__ == "__main__":

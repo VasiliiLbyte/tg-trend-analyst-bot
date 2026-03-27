@@ -35,3 +35,27 @@ def test_save_news_item_idempotent(tmp_path: Path) -> None:
     assert item_id1 is not None
     assert item_id2 is None
 
+
+def test_save_post_and_find_existing_post(tmp_path: Path) -> None:
+    engine = build_engine(DatabaseConfig(sqlite_path=tmp_path / "t.sqlite3"))
+    init_db(engine)
+    sf = build_session_factory(engine)
+    dao = StorageDao(engine=engine, session_factory=sf, cfg=DaoConfig(ttl_days=30))
+
+    post_id = dao.save_post(
+        kind="digest",
+        channel_id="@test_channel",
+        content="digest text",
+        item_ids=(1, 2, 3),
+    )
+    assert post_id > 0
+
+    existing = dao.find_existing_post(
+        kind="digest",
+        channel_id="@test_channel",
+        content="digest text",
+        item_ids=(1, 2, 3),
+    )
+    assert existing is not None
+    assert existing.id == post_id
+

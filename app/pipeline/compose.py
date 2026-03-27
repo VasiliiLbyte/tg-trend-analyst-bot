@@ -20,12 +20,26 @@ def split_telegram_messages(text: str, *, max_len: int = 4096) -> tuple[str, ...
     cur: list[str] = []
     cur_len = 0
     for line in text.splitlines(True):
-        if cur_len + len(line) > max_len and cur:
-            parts.append("".join(cur).rstrip())
-            cur = []
-            cur_len = 0
-        cur.append(line)
-        cur_len += len(line)
+        rest = line
+        while rest:
+            space_left = max_len - cur_len
+            if space_left <= 0 and cur:
+                parts.append("".join(cur).rstrip())
+                cur = []
+                cur_len = 0
+                space_left = max_len
+
+            if len(rest) <= space_left:
+                cur.append(rest)
+                cur_len += len(rest)
+                rest = ""
+            else:
+                chunk = rest[:space_left]
+                cur.append(chunk)
+                parts.append("".join(cur).rstrip())
+                cur = []
+                cur_len = 0
+                rest = rest[space_left:]
     if cur:
         parts.append("".join(cur).rstrip())
     return tuple(p for p in parts if p)
@@ -55,7 +69,7 @@ def compose_digest(
     text = "\n".join(lines).strip()
     return PreparedPost(
         kind="digest",
-        item_ids=tuple(),  # filled by caller if needed
+        item_ids=tuple(r.item.id for r in top if getattr(r.item, "id", None) is not None),
         messages=split_telegram_messages(text),
     )
 

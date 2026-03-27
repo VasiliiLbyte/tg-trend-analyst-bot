@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import logging
+import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import delete, select, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.exc import IntegrityError
 
 from app.sources.models import NewsItem
-from app.storage.models import Analysis, Item
+from app.storage.models import Analysis, Item, Post
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +106,116 @@ class StorageDao:
             analysis = Analysis(item_id=item_id, model=model, prompt_version=prompt_version, payload=payload)
             session.add(analysis)
             session.execute(update(Item).where(Item.id == item_id).values(analyzed_at=ts))
+            session.commit()
+
+    def find_existing_post(
+        self,
+        *,
+        kind: str,
+        channel_id: str,
+        content: str,
+        item_ids: tuple[int, ...],
+    ) -> Post | None:
+        key = self.build_post_idempotency_key(
+            kind=kind,
+            channel_id=channel_id,
+            content=content,
+            item_ids=item_ids,
+        )
+        with self._sf() as session:
+            return session.execute(
+                select(Post).where(Post.idempotency_key == key, Post.status == "published")
+            ).scalar_one_or_none()
+
+    @staticmethod
+    def build_post_idempotency_key(
+        *,
+        kind: str,
+        channel_id: str,
+        content: str,
+        item_ids: tuple[int, ...],
+    ) -> str:
+        normalized_item_ids = ",".join(str(i) for i in item_ids)
+        payload = f"{kind}|{channel_id}|{normalized_item_ids}|{content}".encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()
+
+    def save_post(
+        self,
+        *,
+        kind: str,
+        channel_id: str,
+        content: str,
+        item_ids: tuple[int, ...],
+        published_at: datetime | None = None,
+    ) -> int:
+        ts = published_at or datetime.now(tz=timezone.utc)
+        idempotency_key = self.build_post_idempotency_key(
+            kind=kind,
+            channel_id=channel_id,
+            content=content,
+            item_ids=item_ids,
+        )
+        with self._sf() as session:
+            post = Post(
+                kind=kind,
+                idempotency_key=idempotency_key,
+                status="published",
+                channel_id=channel_id,
+                content=content,
+                item_ids=list(item_ids),
+                published_at=ts,
+            )
+            session.add(post)
+            session.commit()
+            return post.id
+
+    def claim_post_if_new(
+        self,
+        *,
+        kind: str,
+        channel_id: str,
+        content: str,
+        item_ids: tuple[int, ...],
+    ) -> int | None:
+        idempotency_key = self.build_post_idempotency_key(
+            kind=kind,
+            channel_id=channel_id,
+            content=content,
+            item_ids=item_ids,
+        )
+        with self._sf() as session:
+            existing = session.execute(select(Post).where(Post.idempotency_key == idempotency_key)).scalar_one_or_none()
+            if existing is not None:
+                logger.info("post_already_claimed", extra={"kind": kind, "channel_id": channel_id})
+                return None
+
+            post = Post(
+                kind=kind,
+                idempotency_key=idempotency_key,
+                status="pending",
+                channel_id=channel_id,
+                content=content,
+                item_ids=list(item_ids),
+                published_at=None,
+            )
+            session.add(post)
+            try:
+                session.commit()
+                return post.id
+            except IntegrityError:
+                session.rollback()
+                logger.info("post_already_claimed", extra={"kind": kind, "channel_id": channel_id})
+                return None
+
+    def mark_post_published(self, *, post_id: int, published_at: datetime | None = None) -> None:
+        ts = published_at or datetime.now(tz=timezone.utc)
+        with self._sf() as session:
+            session.execute(update(Post).where(Post.id == post_id).values(status="published", published_at=ts))
+            session.commit()
+
+    def mark_post_failed(self, *, post_id: int) -> None:
+        with self._sf() as session:
+            session.execute(update(Post).where(Post.id == post_id).values(status="failed"))
             session.commit()
 
     def cleanup_old_items(self) -> int:

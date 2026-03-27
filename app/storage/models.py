@@ -65,15 +65,18 @@ class Post(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     kind: Mapped[str] = mapped_column(String(50), nullable=False)  # e.g. digest/deep_dive
+    idempotency_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="published")
     content: Mapped[str] = mapped_column(Text, nullable=False)
     item_ids: Mapped[list[int]] = mapped_column(SQLiteJSON, nullable=False)
 
     channel_id: Mapped[str] = mapped_column(String(64), nullable=False)
-    published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
     __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_posts_idempotency_key"),
         Index("ix_posts_published_at", "published_at"),
         Index("ix_posts_channel_id", "channel_id"),
     )
